@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Handbook WhatsApp Bot</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #1f2937; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    img { max-width: 280px; display: block; margin-top: 12px; }
+    button { padding: 10px 14px; border: 0; border-radius: 8px; background: #111827; color: white; cursor: pointer; }
+    #status { font-weight: 600; }
+    #messages { white-space: pre-wrap; font-size: 14px; color: #374151; }
+  </style>
+</head>
+<body>
+  <h1>Handbook WhatsApp Bot</h1>
+  <div class="card">
+    <div>Status: <span id="status">loading...</span></div>
+    <div id="qr-wrap"></div>
+    <button id="reconnect">Reconnect</button>
+  </div>
+  <div class="card">
+    <h2>Recent messages</h2>
+    <div id="messages">Waiting for WhatsApp messages...</div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const statusEl = document.getElementById('status');
+    const qrWrap = document.getElementById('qr-wrap');
+    const messagesEl = document.getElementById('messages');
+    const socket = io();
+
+    socket.on('connection-status', (status) => {
+      statusEl.textContent = status;
+    });
+
+    socket.on('qr-code', (qr) => {
+      qrWrap.innerHTML = qr ? `<img src="${qr}" alt="WhatsApp QR code" />` : '';
+    });
+
+    socket.on('new-message', (payload) => {
+      const line = `[${payload.timestamp}] ${payload.from}: ${payload.message}`;
+      messagesEl.textContent = messagesEl.textContent === 'Waiting for WhatsApp messages...'
+        ? line
+        : `${line}\n${messagesEl.textContent}`;
+    });
+
+    socket.on('ai-response', (payload) => {
+      const improved = payload.improved ? `\nImproved: ${payload.improved}` : '';
+      const line = `[${payload.timestamp}] BOT -> ${payload.to}${improved}\n${payload.response}`;
+      messagesEl.textContent = `${line}\n\n${messagesEl.textContent}`;
+    });
+
+    document.getElementById('reconnect').addEventListener('click', () => {
+      socket.emit('reconnect-bot');
+    });
+  </script>
+</body>
+</html>
