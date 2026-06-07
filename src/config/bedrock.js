@@ -60,6 +60,7 @@ const getAIProviderStatus = () => ({
   gemini: {
     configured: Boolean(process.env.GEMINI_API_KEY),
     model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash-lite',
     role: 'generation-fallback',
   },
   bedrock: {
@@ -216,30 +217,39 @@ const invokeModel = async (options) => {
   }
 
   if (generationFallbackNeeded && process.env.GEMINI_API_KEY && !options.attachment) {
-    try {
-      const answer = await callGemini(options);
-      providerStats.geminiSuccesses += 1;
-      providerStats.fallbacksToGemini += 1;
-      recordProviderCall({
-        operation: 'generation',
-        task: options.task || 'generation',
-        provider: 'gemini',
-        model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-        status: 'success',
-      });
-      return answer;
-    } catch (error) {
-      providerStats.geminiFailures += 1;
-      recordProviderCall({
-        operation: 'generation',
-        task: options.task || 'generation',
-        provider: 'gemini',
-        model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-        status: 'failed',
-        error: error.message,
-      });
-      console.error('Gemini invocation failed, falling back to Bedrock:', error.message);
+    const geminiModels = [...new Set([
+      process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash-lite',
+    ])];
+
+    for (const geminiModel of geminiModels) {
+      try {
+        const answer = await callGemini({ ...options, model: geminiModel });
+        providerStats.geminiSuccesses += 1;
+        providerStats.fallbacksToGemini += 1;
+        recordProviderCall({
+          operation: 'generation',
+          task: options.task || 'generation',
+          provider: 'gemini',
+          model: geminiModel,
+          status: 'success',
+        });
+        return answer;
+      } catch (error) {
+        providerStats.geminiFailures += 1;
+        recordProviderCall({
+          operation: 'generation',
+          task: options.task || 'generation',
+          provider: 'gemini',
+          model: geminiModel,
+          status: 'failed',
+          error: error.message,
+        });
+        console.error(`Gemini model ${geminiModel} failed:`, error.message);
+      }
     }
+
+    console.error('All Gemini models failed, falling back to Bedrock.');
   }
 
   if (generationFallbackNeeded) providerStats.fallbacksToBedrock += 1;

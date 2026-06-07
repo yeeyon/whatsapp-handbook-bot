@@ -1,8 +1,8 @@
 const https = require('https');
 
-const callGemini = async ({ systemText, userText, maxTokens = 500, temperature = 0.2 }) => {
+const callGemini = async ({ systemText, userText, maxTokens = 500, temperature = 0.2, model }) => {
   const apiKey = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const selectedModel = model || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not configured in environment variables.');
@@ -21,7 +21,7 @@ const callGemini = async ({ systemText, userText, maxTokens = 500, temperature =
   const options = {
     hostname: 'generativelanguage.googleapis.com',
     port: 443,
-    path: `/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    path: `/v1beta/models/${encodeURIComponent(selectedModel)}:generateContent`,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
