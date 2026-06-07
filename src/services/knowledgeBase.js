@@ -8,6 +8,7 @@ const {
   improveHandbookQuestion,
   localizeText,
   decideReplyImages,
+  runWithProviderTrace,
 } = require('../config/bedrock');
 const {
   getHandbookPageImages,
@@ -457,7 +458,7 @@ const searchLearnedMemories = async (question, options = {}) => {
     .slice(0, Number(options.limit || 3));
 };
 
-const answerKnowledgeQuestion = async (question, options = {}) => {
+const answerKnowledgeQuestionInternal = async (question, options = {}) => {
   const conversation = options.conversationId
     ? { id: options.conversationId }
     : options.conversationKey
@@ -645,6 +646,13 @@ const answerKnowledgeQuestion = async (question, options = {}) => {
     conversationId: conversation?.id || null,
     turnId: turn?.id || null,
   };
+};
+
+const answerKnowledgeQuestion = async (question, options = {}) => {
+  const { result, aiProvider } = await runWithProviderTrace(
+    () => answerKnowledgeQuestionInternal(question, options)
+  );
+  return { ...result, aiProvider };
 };
 
 module.exports = {

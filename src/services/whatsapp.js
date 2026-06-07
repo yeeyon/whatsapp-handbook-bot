@@ -103,6 +103,11 @@ const handleQuestion = async (sock, remoteJid, question) => {
     const result = await answerKnowledgeQuestion(question, { conversationId: conversation.id });
     const answer = result.answer || result;
     const improved = result.refined?.improvedQuestion;
+    console.log(
+      `AI generation provider: ${result.aiProvider?.generationProvider || 'none'}`
+      + `${result.aiProvider?.generationModel ? ` (${result.aiProvider.generationModel})` : ''}`
+      + `${result.aiProvider?.fallbackUsed ? ' [fallback]' : ''}`
+    );
 
     const images = Array.isArray(result.images) ? result.images : [];
     const isDirectPageRequest = result.imageDecision?.reason === 'Exact handbook page requested';
@@ -134,6 +139,7 @@ const handleQuestion = async (sock, remoteJid, question) => {
       images: images.map((image) => image.pageNumber),
       timestamp: new Date().toISOString(),
       turnId: result.turnId,
+      aiProvider: result.aiProvider,
     });
   } finally {
     await showTyping(sock, remoteJid, false);

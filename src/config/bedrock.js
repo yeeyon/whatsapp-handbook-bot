@@ -1,4 +1,5 @@
 const https = require('https');
+const { AsyncLocalStorage } = require('async_hooks');
 const { BedrockRuntimeClient, ConverseCommand, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 require('dotenv').config();
 const { callOpenRouter } = require('./openrouter');
@@ -9,6 +10,56 @@ const modelId = process.env.BEDROCK_MODEL_ID || 'anthropic.claude-3-haiku-202403
 const embeddingModelId = process.env.BEDROCK_EMBEDDING_MODEL_ID || 'amazon.titan-embed-text-v2:0';
 const bearerToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
 const hasAwsCredentials = Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
+const providerTraceStorage = new AsyncLocalStorage();
+const providerStats = {
+  openrouterSuccesses: 0,
+  openrouterFailures: 0,
+  bedrockGenerationSuccesses: 0,
+  bedrockGenerationFailures: 0,
+  bedrockEmbeddingSuccesses: 0,
+  bedrockEmbeddingFailures: 0,
+  fallbacksToBedrock: 0,
+};
+
+const recordProviderCall = (call) => {
+  const trace = providerTraceStorage.getStore();
+  if (trace) trace.calls.push({ ...call, timestamp: new Date().toISOString() });
+};
+
+const summarizeProviderTrace = (calls) => {
+  const generationCalls = calls.filter((call) => call.operation === 'generation');
+  const successfulGenerationCalls = generationCalls.filter((call) => call.status === 'success');
+  const finalGeneration = successfulGenerationCalls[successfulGenerationCalls.length - 1] || null;
+  const openrouterFailed = generationCalls.some((call) => call.provider === 'openrouter' && call.status === 'failed');
+
+  return {
+    generationProvider: finalGeneration?.provider || 'none',
+    generationModel: finalGeneration?.model || null,
+    fallbackUsed: openrouterFailed && finalGeneration?.provider === 'bedrock',
+    calls,
+  };
+};
+
+const runWithProviderTrace = async (operation) => providerTraceStorage.run({ calls: [] }, async () => {
+  const result = await operation();
+  return { result, aiProvider: summarizeProviderTrace(providerTraceStorage.getStore().calls) };
+});
+
+const getAIProviderStatus = () => ({
+  configuredGenerationProvider: process.env.USE_OPENROUTER === 'true' ? 'openrouter' : 'bedrock',
+  openrouter: {
+    enabled: process.env.USE_OPENROUTER === 'true',
+    configured: Boolean(process.env.OPENROUTER_API_KEY),
+    model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+  },
+  bedrock: {
+    configured: Boolean(bearerToken || hasAwsCredentials),
+    generationModel: modelId,
+    embeddingModel: embeddingModelId,
+    role: process.env.USE_OPENROUTER === 'true' ? 'fallback-and-embeddings' : 'generation-and-embeddings',
+  },
+  processStats: { ...providerStats },
+});
 
 const client = hasAwsCredentials ? new BedrockRuntimeClient({
   region,
@@ -128,21 +179,80 @@ const invokeModel = async (options) => {
     messages.push({ role: 'user', content: options.userText });
 
     try {
-      return await callOpenRouter(messages);
+      const answer = await callOpenRouter(messages);
+      providerStats.openrouterSuccesses += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'openrouter',
+        model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+        status: 'success',
+      });
+      return answer;
     } catch (error) {
+      providerStats.openrouterFailures += 1;
+      providerStats.fallbacksToBedrock += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'openrouter',
+        model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+        status: 'failed',
+        error: error.message,
+      });
       console.error('OpenRouter invocation failed, falling back to Bedrock:', error.message);
     }
   }
 
   if (bearerToken) {
     try {
-      return await invokeWithBearerToken(options);
+      const answer = await invokeWithBearerToken(options);
+      providerStats.bedrockGenerationSuccesses += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'bedrock',
+        model: modelId,
+        status: 'success',
+      });
+      return answer;
     } catch (error) {
+      providerStats.bedrockGenerationFailures += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'bedrock',
+        model: modelId,
+        status: 'failed',
+        error: error.message,
+      });
       console.error('Bedrock bearer token invocation failed:', error.message);
       if (!hasAwsCredentials) throw error;
     }
   }
-  return invokeWithAwsSdk(options);
+  try {
+    const answer = await invokeWithAwsSdk(options);
+    providerStats.bedrockGenerationSuccesses += 1;
+    recordProviderCall({
+      operation: 'generation',
+      task: options.task || 'generation',
+      provider: 'bedrock',
+      model: modelId,
+      status: 'success',
+    });
+    return answer;
+  } catch (error) {
+    providerStats.bedrockGenerationFailures += 1;
+    recordProviderCall({
+      operation: 'generation',
+      task: options.task || 'generation',
+      provider: 'bedrock',
+      model: modelId,
+      status: 'failed',
+      error: error.message,
+    });
+    throw error;
+  }
 };
 
 
@@ -212,13 +322,31 @@ const generateEmbedding = async (text) => {
   if (!inputText) return null;
   if (bearerToken) {
     try {
-      return await invokeEmbeddingWithBearerToken(inputText);
+      const embedding = await invokeEmbeddingWithBearerToken(inputText);
+      providerStats.bedrockEmbeddingSuccesses += 1;
+      recordProviderCall({ operation: 'embedding', provider: 'bedrock', model: embeddingModelId, status: 'success' });
+      return embedding;
     } catch (error) {
+      providerStats.bedrockEmbeddingFailures += 1;
+      recordProviderCall({
+        operation: 'embedding', provider: 'bedrock', model: embeddingModelId, status: 'failed', error: error.message,
+      });
       console.error('Bedrock embedding bearer token invocation failed:', error.message);
       if (!hasAwsCredentials) throw error;
     }
   }
-  return invokeEmbeddingWithAwsSdk(inputText);
+  try {
+    const embedding = await invokeEmbeddingWithAwsSdk(inputText);
+    providerStats.bedrockEmbeddingSuccesses += 1;
+    recordProviderCall({ operation: 'embedding', provider: 'bedrock', model: embeddingModelId, status: 'success' });
+    return embedding;
+  } catch (error) {
+    providerStats.bedrockEmbeddingFailures += 1;
+    recordProviderCall({
+      operation: 'embedding', provider: 'bedrock', model: embeddingModelId, status: 'failed', error: error.message,
+    });
+    throw error;
+  }
 };
 
 const extractJsonObject = (text) => {
@@ -264,7 +392,7 @@ ${historyText}
 User message: ${rawQuestion}`;
 
   try {
-    const content = await invokeModel({ systemText, userText, maxTokens: 220, temperature: 0 });
+    const content = await invokeModel({ systemText, userText, maxTokens: 220, temperature: 0, task: 'question-rewrite' });
     const parsed = extractJsonObject(content);
     const improvedQuestion = String(parsed.improvedQuestion || rawQuestion).trim() || rawQuestion;
     const searchQueries = Array.isArray(parsed.searchQueries)
@@ -297,7 +425,7 @@ Message:
 ${sourceText}`;
 
   try {
-    const translated = await invokeModel({ systemText, userText, maxTokens: 700, temperature: 0.1 });
+    const translated = await invokeModel({ systemText, userText, maxTokens: 700, temperature: 0.1, task: 'translation' });
     return String(translated || '').trim() || sourceText;
   } catch (error) {
     console.error('Localization failed:', error.message);
@@ -353,7 +481,7 @@ Return ONLY JSON:
 Select a page only when its matching text clearly refers to the requested visual object. Do not send a generic page, a loosely related page, or an image merely because the retrieved text contains visual words.`;
 
   try {
-    const content = await invokeModel({ systemText, userText, maxTokens: 180, temperature: 0 });
+    const content = await invokeModel({ systemText, userText, maxTokens: 180, temperature: 0, task: 'image-selection' });
     const parsed = extractJsonObject(content);
     const selected = Array.isArray(parsed.pageNumbers)
       ? parsed.pageNumbers.map(Number).filter((value) => availablePages.includes(value)).slice(0, 1)
@@ -378,7 +506,7 @@ const answerWithKnowledgeContext = async ({ question, improvedQuestion, contexts
   const systemText = 'You are a careful property handbook assistant on WhatsApp. Answer using only the provided context. Prefer handbook sources. Distinguish exact labels and locations: never present a yard grille measurement as a master-bedroom window measurement. Cite handbook page numbers when they appear in context. If the requested detail is absent but a related drawing exists, state exactly what the drawing covers and what it does not prove. A context explicitly labeled User correction is trusted user-provided knowledge and may clarify or override an earlier learned answer. Do not include conversational labels, prefixes, or metadata tags (such as "Previously asked:", "Learned answer:", "Question:", "Answer:", or "Prior Answer:") in your output. Go straight to the answer. Be concise, practical, and easy to read on mobile.';
   const userText = `Handbook context:\n${contextText || '(no context)'}\n\nOriginal user question: ${question}\nImproved handbook question: ${improvedQuestion || question}\n\nProvide a helpful answer grounded in the handbook.`;
 
-  const answer = await invokeModel({ systemText, userText, maxTokens: 700, temperature: 0.3 });
+  const answer = await invokeModel({ systemText, userText, maxTokens: 700, temperature: 0.3, task: 'handbook-answer' });
   return { answer, matches: contexts };
 };
 
@@ -403,10 +531,13 @@ Do not infer measurements or room associations that are not explicitly shown. Wr
     },
     maxTokens: 4000,
     temperature: 0,
+    task: 'document-ocr',
   });
 };
 
 module.exports = {
+  getAIProviderStatus,
+  runWithProviderTrace,
   generateEmbedding,
   improveHandbookQuestion,
   localizeText,

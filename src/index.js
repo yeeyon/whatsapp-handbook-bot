@@ -22,6 +22,7 @@ const {
   recordFeedback,
 } = require('./services/conversationMemory');
 const { getPageImagePath } = require('./services/pageImages');
+const { getAIProviderStatus } = require('./config/bedrock');
 
 const app = express();
 const server = http.createServer(app);
@@ -62,6 +63,10 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/whatsapp/status', (_req, res) => {
   res.json({ status: getConnectionStatus(), hasQR: Boolean(getQRCodeData()) });
+});
+
+app.get('/api/ai/provider', (_req, res) => {
+  res.json(getAIProviderStatus());
 });
 
 app.get('/api/handbook/pages/:sourceId/:pageNumber/image', (req, res) => {
@@ -243,6 +248,7 @@ app.post('/api/whatsapp/webhook', async (req, res) => {
       reply: answer,
       sender,
       turnId: result.turnId,
+      aiProvider: result.aiProvider,
     });
   } catch (error) {
     console.error('Webhook error:', error);
