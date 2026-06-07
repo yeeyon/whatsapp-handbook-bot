@@ -16,9 +16,10 @@ test('callOpenRouter returns response from real OpenRouter API', async () => {
   try {
     const response = await callOpenRouter(messages);
     console.log('OpenRouter Real Response:', response);
-    assert.ok(response);
-    assert.equal(typeof response, 'string');
-    assert.ok(response.trim().length > 0);
+    assert.ok(response.content);
+    assert.equal(typeof response.content, 'string');
+    assert.ok(response.content.trim().length > 0);
+    assert.ok(response.keySlot >= 1);
   } catch (error) {
     console.error('OpenRouter real API call failed:', error.message);
     throw error;
@@ -26,14 +27,24 @@ test('callOpenRouter returns response from real OpenRouter API', async () => {
 });
 
 test('callOpenRouter throws error if API key is missing', async () => {
-  const originalKey = process.env.OPENROUTER_API_KEY;
+  const originalKeys = [
+    process.env.OPENROUTER_API_KEY,
+    process.env.OPENROUTER_API_KEY_2,
+    process.env.OPENROUTER_API_KEY_3,
+  ];
   delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY_2;
+  delete process.env.OPENROUTER_API_KEY_3;
   try {
     await callOpenRouter([{ role: 'user', content: 'hello' }]);
     assert.fail('Should have thrown an error when API key is missing');
   } catch (error) {
     assert.match(error.message, /OPENROUTER_API_KEY is not configured/);
   } finally {
-    process.env.OPENROUTER_API_KEY = originalKey;
+    const names = ['OPENROUTER_API_KEY', 'OPENROUTER_API_KEY_2', 'OPENROUTER_API_KEY_3'];
+    names.forEach((name, index) => {
+      if (originalKeys[index] === undefined) delete process.env[name];
+      else process.env[name] = originalKeys[index];
+    });
   }
 });

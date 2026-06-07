@@ -1,13 +1,14 @@
 const https = require('https');
 require('dotenv').config();
 
-const callOpenRouter = async (messages) => {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = process.env.OPENROUTER_MODEL || 'openrouter/free';
+const getOpenRouterKeys = () => [
+  process.env.OPENROUTER_API_KEY,
+  process.env.OPENROUTER_API_KEY_2,
+  process.env.OPENROUTER_API_KEY_3,
+].filter(Boolean);
 
-  if (!apiKey) {
-    throw new Error('OPENROUTER_API_KEY is not configured in environment variables.');
-  }
+const callOpenRouterWithKey = async (messages, apiKey) => {
+  const model = process.env.OPENROUTER_MODEL || 'openrouter/free';
 
   const body = JSON.stringify({
     model,
@@ -61,6 +62,26 @@ const callOpenRouter = async (messages) => {
   });
 };
 
+const callOpenRouter = async (messages) => {
+  const apiKeys = getOpenRouterKeys();
+  if (!apiKeys.length) {
+    throw new Error('OPENROUTER_API_KEY is not configured in environment variables.');
+  }
+
+  const failures = [];
+  for (let index = 0; index < apiKeys.length; index += 1) {
+    try {
+      const content = await callOpenRouterWithKey(messages, apiKeys[index]);
+      return { content, keySlot: index + 1 };
+    } catch (error) {
+      failures.push(`key-${index + 1}: ${error.message}`);
+    }
+  }
+
+  throw new Error(`All OpenRouter keys failed (${failures.join('; ')})`);
+};
+
 module.exports = {
-  callOpenRouter
+  callOpenRouter,
+  getOpenRouterKeys,
 };

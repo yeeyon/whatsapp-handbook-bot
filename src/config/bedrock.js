@@ -55,6 +55,11 @@ const getAIProviderStatus = () => ({
   openrouter: {
     enabled: process.env.USE_OPENROUTER === 'true',
     configured: Boolean(process.env.OPENROUTER_API_KEY),
+    configuredKeyCount: [
+      process.env.OPENROUTER_API_KEY,
+      process.env.OPENROUTER_API_KEY_2,
+      process.env.OPENROUTER_API_KEY_3,
+    ].filter(Boolean).length,
     model: process.env.OPENROUTER_MODEL || 'openrouter/free',
   },
   gemini: {
@@ -191,7 +196,7 @@ const invokeModel = async (options) => {
     messages.push({ role: 'user', content: options.userText });
 
     try {
-      const answer = await callOpenRouter(messages);
+      const openrouterResult = await callOpenRouter(messages);
       providerStats.openrouterSuccesses += 1;
       recordProviderCall({
         operation: 'generation',
@@ -199,8 +204,9 @@ const invokeModel = async (options) => {
         provider: 'openrouter',
         model: process.env.OPENROUTER_MODEL || 'openrouter/free',
         status: 'success',
+        keySlot: `key-${openrouterResult.keySlot}`,
       });
-      return answer;
+      return openrouterResult.content;
     } catch (error) {
       generationFallbackNeeded = true;
       providerStats.openrouterFailures += 1;
