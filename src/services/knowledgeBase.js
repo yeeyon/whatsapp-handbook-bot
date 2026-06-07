@@ -623,8 +623,9 @@ const answerKnowledgeQuestionInternal = async (question, options = {}) => {
 
   // Clean RAG responses from any leaked metadata tags
   const cleanAnswer = cleanLeakedMetadata(result.answer);
-  const localizedAnswer = standardizeHandbookAnswer(
-    cleanLeakedMetadata(await localizeText(cleanAnswer, refined.detectedLanguage))
+  const localizedAnswer = await standardizeHandbookAnswer(
+    cleanLeakedMetadata(await localizeText(cleanAnswer, refined.detectedLanguage)),
+    { question: refined.originalQuestion }
   );
 
   const images = imageDecision.sendImages && sourceId
