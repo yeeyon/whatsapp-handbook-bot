@@ -19,7 +19,7 @@ const {
 } = require('./conversationMemory');
 
 const logger = pino({ level: 'warn' });
-const AUTH_DIR = process.env.AUTH_STATE_DIR || path.join(process.cwd(), 'auth_info_baileys');
+const AUTH_DIR = process.env.AUTH_STATE_DIR || path.join(__dirname, '..', '..', 'auth_info_baileys');
 
 let globalSock = null;
 let reconnectTimeout = null;

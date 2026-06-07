@@ -4,7 +4,7 @@ const { pathToFileURL } = require('url');
 const { createCanvas } = require('@napi-rs/canvas');
 
 const HANDBOOK_PAGES_DIR = process.env.HANDBOOK_PAGES_DIR
-  || path.join(process.cwd(), 'data', 'handbook-pages');
+  || path.join(__dirname, '..', '..', 'data', 'handbook-pages');
 
 const ensurePagesDir = (sourceId) => {
   const dir = path.join(HANDBOOK_PAGES_DIR, String(sourceId));

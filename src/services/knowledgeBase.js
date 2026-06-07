@@ -43,6 +43,23 @@ const DIRECT_PAGE_REQUEST_PATTERN = /(?:^|\b(?:show|send|give|open|view|see|disp
 
 const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
+const cleanLeakedMetadata = (text) => {
+  if (typeof text !== 'string') return text;
+  
+  let clean = text;
+  
+  // If there are "Learned answer:" occurrences, get the last one
+  if (clean.includes('Learned answer:')) {
+    const parts = clean.split('Learned answer:');
+    clean = parts[parts.length - 1];
+  }
+  
+  // Clean any leading/trailing tags
+  clean = clean.replace(/^(Previously asked:|Learned answer:|User Question:|Answer:)\s*/gim, '').trim();
+  
+  return clean;
+};
+
 const normalizeForSearch = (value) => normalizeWhitespace(value)
   .toLowerCase()
   .replace(/[^a-z0-9\s]/g, ' ');
@@ -406,7 +423,7 @@ const searchLearnedMemories = async (question, options = {}) => {
       const confidence = Number(memory.confidence || 0.35);
       return {
         id: `memory-${memory.id}`,
-        content: `Previously asked: ${memory.question}\nLearned answer: ${memory.answer}`,
+        content: `Fact: For the question "${memory.question}", the correct answer is: ${memory.answer}`,
         title: memory.memory_type === 'user_correction' ? 'User correction' : 'Learned conversation answer',
         source_type: 'learned_memory',
         source_id: null,
@@ -437,9 +454,12 @@ const answerKnowledgeQuestion = async (question, options = {}) => {
       getLatestHandbookPage(requestedPage),
       getLatestHandbookPageCount(),
     ]);
-    const answer = page
+    let answer = page
       ? `Here is page ${requestedPage} of ${pageCount || 'the handbook'}.`
       : `Page ${requestedPage} is not available. The current handbook has ${pageCount} page${pageCount === 1 ? '' : 's'}.`;
+    if (page && process.env.PUBLIC_URL) {
+      answer += `\n\nView PDF: ${process.env.PUBLIC_URL}/handbook.pdf#page=${requestedPage}`;
+    }
     const images = page
       ? await getHandbookPageImages({ sourceId: page.source_id, pageNumbers: [requestedPage] })
       : [];
@@ -563,7 +583,16 @@ const answerKnowledgeQuestion = async (question, options = {}) => {
     };
   }
 
-  const localizedAnswer = await localizeText(result.answer, refined.detectedLanguage);
+  // Clean RAG responses from any leaked metadata tags
+  const cleanAnswer = cleanLeakedMetadata(result.answer);
+  let localizedAnswer = cleanLeakedMetadata(await localizeText(cleanAnswer, refined.detectedLanguage));
+
+  // If PUBLIC_URL is configured and we have candidate pages, append direct PDF page reference links
+  if (process.env.PUBLIC_URL && candidatePages.length > 0) {
+    const links = candidatePages.map((p) => `${process.env.PUBLIC_URL}/handbook.pdf#page=${p}`).join('\n');
+    localizedAnswer += `\n\nPDF Page Reference(s):\n${links}`;
+  }
+
   const images = imageDecision.sendImages && sourceId
     ? await getHandbookPageImages({ sourceId, pageNumbers: imageDecision.pageNumbers })
     : [];

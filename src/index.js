@@ -32,6 +32,19 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '../public')));
 
+app.get('/handbook.pdf', (req, res) => {
+  const envPath = process.env.HANDBOOK_PATH;
+  const defaultPath = path.join(__dirname, '../data/handbook.pdf');
+  const pdfPath = path.resolve(envPath || defaultPath);
+
+  if (!fs.existsSync(pdfPath)) {
+    return res.status(404).send('Handbook PDF not found');
+  }
+
+  res.setHeader('Content-Type', 'application/pdf');
+  return res.sendFile(pdfPath);
+});
+
 setIO(io);
 
 io.on('connection', (socket) => {
