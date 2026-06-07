@@ -20,15 +20,16 @@ const getPageNumbersFromContext = (context) => {
   return parsePageMarkers(context?.content);
 };
 
-const insertHandbookPage = async (client, { sourceId, pageNumber, imagePath, ocrText }) => {
+const insertHandbookPage = async (client, { sourceId, pageNumber, imagePath, ocrText, imageData }) => {
   await client.query(
-    `INSERT INTO handbook_pages (source_id, page_number, image_path, ocr_text)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO handbook_pages (source_id, page_number, image_path, ocr_text, image_data)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (source_id, page_number)
      DO UPDATE SET
        image_path = EXCLUDED.image_path,
-       ocr_text = COALESCE(EXCLUDED.ocr_text, handbook_pages.ocr_text)`,
-    [sourceId, pageNumber, imagePath, ocrText || null]
+       ocr_text = COALESCE(EXCLUDED.ocr_text, handbook_pages.ocr_text),
+       image_data = COALESCE(EXCLUDED.image_data, handbook_pages.image_data)`,
+    [sourceId, pageNumber, imagePath, ocrText || null, imageData || null]
   );
 };
 
@@ -76,7 +77,18 @@ const getHandbookPageImages = async ({ sourceId, pageNumbers }) => {
   const images = [];
 
   for (const pageNumber of pageNumbers) {
-    const buffer = await loadPageImage(sourceId, pageNumber);
+    const result = await pool.query(
+      `SELECT image_data FROM handbook_pages WHERE source_id = $1 AND page_number = $2`,
+      [sourceId, pageNumber]
+    );
+
+    let buffer = result.rows[0]?.image_data;
+
+    // Fallback to disk if not found in DB
+    if (!buffer) {
+      buffer = await loadPageImage(sourceId, pageNumber);
+    }
+
     if (!buffer) continue;
     images.push({ pageNumber, buffer });
   }

@@ -53,6 +53,7 @@ const main = async () => {
         pageNumber,
         imagePath,
         ocrText: null,
+        imageData: imageBuffer,
       });
 
       await client.query(

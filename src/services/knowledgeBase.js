@@ -302,6 +302,7 @@ const createKnowledgeSourceFromPages = async ({
         pageNumber: page.pageNumber,
         imagePath,
         ocrText: page.text,
+        imageData: page.imageBuffer,
       });
     }
 
