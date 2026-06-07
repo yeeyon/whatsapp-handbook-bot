@@ -70,3 +70,10 @@ test('expands and consolidates handbook page ranges', () => {
     'Rules.\n\n_Source: Handbook pages 17, 18_'
   );
 });
+
+test('repairs common phrase and text-to-number collisions', () => {
+  assert.equal(
+    standardizeHandbookAnswer('The emergency numberof Bayan Baru is not listed. Open from8:00 am.'),
+    'The emergency number of Bayan Baru is not listed. Open from 8:00 am.'
+  );
+});

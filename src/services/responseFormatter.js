@@ -39,6 +39,12 @@ const repairCommonWordCollisions = (text) => String(text || '').replace(
 ).replace(
   /\b(Game|Games|Emergency|Police|Handbook)(Room|Rules|Number|Contact|Station)\b/g,
   '$1 $2'
+).replace(
+  /\b(number|hours|handbook|room|rules|contact|station|open)(of|for|from|to|and|is|are|in|at)\b/gi,
+  '$1 $2'
+).replace(
+  /\b(from|at|to)(?=\d)/gi,
+  '$1 '
 );
 
 const standardizeHandbookAnswer = (answer) => {
