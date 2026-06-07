@@ -18,6 +18,7 @@ const {
   pickReplyPageNumbers,
 } = require('./handbookPages');
 const { renderPdfPageToJpeg, savePageImage } = require('./pageImages');
+const { standardizeHandbookAnswer } = require('./responseFormatter');
 const {
   getOrCreateConversation,
   getRecentTurns,
@@ -622,7 +623,9 @@ const answerKnowledgeQuestionInternal = async (question, options = {}) => {
 
   // Clean RAG responses from any leaked metadata tags
   const cleanAnswer = cleanLeakedMetadata(result.answer);
-  let localizedAnswer = cleanLeakedMetadata(await localizeText(cleanAnswer, refined.detectedLanguage));
+  const localizedAnswer = standardizeHandbookAnswer(
+    cleanLeakedMetadata(await localizeText(cleanAnswer, refined.detectedLanguage))
+  );
 
   const images = imageDecision.sendImages && sourceId
     ? await getHandbookPageImages({ sourceId, pageNumbers: imageDecision.pageNumbers })

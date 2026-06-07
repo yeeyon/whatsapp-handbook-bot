@@ -561,10 +561,22 @@ const answerWithKnowledgeContext = async ({ question, improvedQuestion, contexts
     .map((context, index) => `[${index + 1}] ${context.title || context.source_type || 'Knowledge'}\n${context.content}`)
     .join('\n\n');
 
-  const systemText = 'You are a careful property handbook assistant on WhatsApp. Answer using only the provided context. Prefer handbook sources. Distinguish exact labels and locations: never present a yard grille measurement as a master-bedroom window measurement. Cite handbook page numbers when they appear in context. If the requested detail is absent but a related drawing exists, state exactly what the drawing covers and what it does not prove. A context explicitly labeled User correction is trusted user-provided knowledge and may clarify or override an earlier learned answer. Do not include conversational labels, prefixes, or metadata tags (such as "Previously asked:", "Learned answer:", "Question:", "Answer:", or "Prior Answer:") in your output. Go straight to the answer. Be concise, practical, and easy to read on mobile.';
-  const userText = `Handbook context:\n${contextText || '(no context)'}\n\nOriginal user question: ${question}\nImproved handbook question: ${improvedQuestion || question}\n\nProvide a helpful answer grounded in the handbook.`;
+  const systemText = `You are a careful property handbook assistant on WhatsApp. Answer using only the provided context. Prefer handbook sources. Distinguish exact labels and locations: never present a yard grille measurement as a master-bedroom window measurement. If the requested detail is absent but a related drawing exists, state exactly what the drawing covers and what it does not prove. A context explicitly labeled User correction is trusted user-provided knowledge and may clarify or override an earlier learned answer.
 
-  const answer = await invokeModel({ systemText, userText, maxTokens: 700, temperature: 0.3, task: 'handbook-answer' });
+Follow this WhatsApp response standard:
+- Give the direct answer first; do not start with filler.
+- For one fact, use one or two short paragraphs without bullets.
+- For multiple facts or rules, use short lines beginning with "- ". Do not use dot bullets, tables, or numbered lists unless order matters.
+- Keep each bullet to one rule. Group repeated handbook page citations into one source line at the end.
+- Write Malaysian phone numbers in international format, for example +60 4-646 2222 or +60 11-7414 6255.
+- Treat place names as exact facts. Never relabel a contact for one location as the contact for another location. If the requested location is not listed, say so, then identify the differently named contact the handbook does list.
+- Use WhatsApp bold sparingly as *Heading*. Do not use Markdown headings.
+- Do not include conversational labels, prefixes, or metadata tags such as "Previously asked:", "Learned answer:", "Question:", "Answer:", or "Prior Answer:".
+
+Be concise, practical, and easy to scan on mobile.`;
+  const userText = `Handbook context:\n${contextText || '(no context)'}\n\nOriginal user question: ${question}\nImproved handbook question: ${improvedQuestion || question}\n\nBefore answering, compare every requested place, facility, room, and contact name against the exact labels in the context. If the requested label is absent, clearly say it is not listed. Do not describe a differently named contact as belonging to the requested place.\n\nProvide a helpful answer grounded in the handbook.`;
+
+  const answer = await invokeModel({ systemText, userText, maxTokens: 700, temperature: 0.1, task: 'handbook-answer' });
   return { answer, matches: contexts };
 };
 
