@@ -3,6 +3,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { BedrockRuntimeClient, ConverseCommand, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 require('dotenv').config();
 const { callOpenRouter } = require('./openrouter');
+const { callGemini } = require('./gemini');
 
 
 const region = process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
@@ -14,10 +15,13 @@ const providerTraceStorage = new AsyncLocalStorage();
 const providerStats = {
   openrouterSuccesses: 0,
   openrouterFailures: 0,
+  geminiSuccesses: 0,
+  geminiFailures: 0,
   bedrockGenerationSuccesses: 0,
   bedrockGenerationFailures: 0,
   bedrockEmbeddingSuccesses: 0,
   bedrockEmbeddingFailures: 0,
+  fallbacksToGemini: 0,
   fallbacksToBedrock: 0,
 };
 
@@ -30,12 +34,13 @@ const summarizeProviderTrace = (calls) => {
   const generationCalls = calls.filter((call) => call.operation === 'generation');
   const successfulGenerationCalls = generationCalls.filter((call) => call.status === 'success');
   const finalGeneration = successfulGenerationCalls[successfulGenerationCalls.length - 1] || null;
-  const openrouterFailed = generationCalls.some((call) => call.provider === 'openrouter' && call.status === 'failed');
+  const providersAttempted = [...new Set(generationCalls.map((call) => call.provider))];
 
   return {
     generationProvider: finalGeneration?.provider || 'none',
     generationModel: finalGeneration?.model || null,
-    fallbackUsed: openrouterFailed && finalGeneration?.provider === 'bedrock',
+    fallbackUsed: providersAttempted.length > 1,
+    providersAttempted,
     calls,
   };
 };
@@ -52,11 +57,16 @@ const getAIProviderStatus = () => ({
     configured: Boolean(process.env.OPENROUTER_API_KEY),
     model: process.env.OPENROUTER_MODEL || 'openrouter/free',
   },
+  gemini: {
+    configured: Boolean(process.env.GEMINI_API_KEY),
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    role: 'generation-fallback',
+  },
   bedrock: {
     configured: Boolean(bearerToken || hasAwsCredentials),
     generationModel: modelId,
     embeddingModel: embeddingModelId,
-    role: process.env.USE_OPENROUTER === 'true' ? 'fallback-and-embeddings' : 'generation-and-embeddings',
+    role: process.env.USE_OPENROUTER === 'true' ? 'last-resort-generation-and-embeddings' : 'generation-and-embeddings',
   },
   processStats: { ...providerStats },
 });
@@ -171,6 +181,7 @@ const invokeWithAwsSdk = async ({ systemText, userText, attachment, maxTokens = 
 };
 
 const invokeModel = async (options) => {
+  let generationFallbackNeeded = false;
   if (process.env.USE_OPENROUTER === 'true' && !options.attachment) {
     const messages = [];
     if (options.systemText) {
@@ -190,8 +201,8 @@ const invokeModel = async (options) => {
       });
       return answer;
     } catch (error) {
+      generationFallbackNeeded = true;
       providerStats.openrouterFailures += 1;
-      providerStats.fallbacksToBedrock += 1;
       recordProviderCall({
         operation: 'generation',
         task: options.task || 'generation',
@@ -200,9 +211,38 @@ const invokeModel = async (options) => {
         status: 'failed',
         error: error.message,
       });
-      console.error('OpenRouter invocation failed, falling back to Bedrock:', error.message);
+      console.error('OpenRouter invocation failed, falling back to Gemini:', error.message);
     }
   }
+
+  if (generationFallbackNeeded && process.env.GEMINI_API_KEY && !options.attachment) {
+    try {
+      const answer = await callGemini(options);
+      providerStats.geminiSuccesses += 1;
+      providerStats.fallbacksToGemini += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'gemini',
+        model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+        status: 'success',
+      });
+      return answer;
+    } catch (error) {
+      providerStats.geminiFailures += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'gemini',
+        model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+        status: 'failed',
+        error: error.message,
+      });
+      console.error('Gemini invocation failed, falling back to Bedrock:', error.message);
+    }
+  }
+
+  if (generationFallbackNeeded) providerStats.fallbacksToBedrock += 1;
 
   if (bearerToken) {
     try {
