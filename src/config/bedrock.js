@@ -64,6 +64,7 @@ const getAIProviderStatus = () => ({
   },
   gemini: {
     configured: Boolean(process.env.GEMINI_API_KEY),
+    configuredKeyCount: [process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEY_2].filter(Boolean).length,
     model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     fallbackModel: process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash-lite',
     role: 'generation-fallback',
@@ -230,7 +231,7 @@ const invokeModel = async (options) => {
 
     for (const geminiModel of geminiModels) {
       try {
-        const answer = await callGemini({ ...options, model: geminiModel });
+        const geminiResult = await callGemini({ ...options, model: geminiModel });
         providerStats.geminiSuccesses += 1;
         providerStats.fallbacksToGemini += 1;
         recordProviderCall({
@@ -239,8 +240,9 @@ const invokeModel = async (options) => {
           provider: 'gemini',
           model: geminiModel,
           status: 'success',
+          keySlot: `key-${geminiResult.keySlot}`,
         });
-        return answer;
+        return geminiResult.content;
       } catch (error) {
         providerStats.geminiFailures += 1;
         recordProviderCall({

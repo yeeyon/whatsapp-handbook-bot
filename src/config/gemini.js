@@ -1,12 +1,12 @@
 const https = require('https');
 
-const callGemini = async ({ systemText, userText, maxTokens = 500, temperature = 0.2, model }) => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  const selectedModel = model || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const getGeminiKeys = () => [
+  process.env.GEMINI_API_KEY,
+  process.env.GEMINI_API_KEY_2,
+].filter(Boolean);
 
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured in environment variables.');
-  }
+const callGeminiWithKey = async ({ systemText, userText, maxTokens = 500, temperature = 0.2, model }, apiKey) => {
+  const selectedModel = model || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
   const body = JSON.stringify({
     systemInstruction: systemText ? { parts: [{ text: systemText }] } : undefined,
@@ -63,4 +63,23 @@ const callGemini = async ({ systemText, userText, maxTokens = 500, temperature =
   });
 };
 
-module.exports = { callGemini };
+const callGemini = async (options) => {
+  const apiKeys = getGeminiKeys();
+  if (!apiKeys.length) {
+    throw new Error('GEMINI_API_KEY is not configured in environment variables.');
+  }
+
+  const failures = [];
+  for (let index = 0; index < apiKeys.length; index += 1) {
+    try {
+      const content = await callGeminiWithKey(options, apiKeys[index]);
+      return { content, keySlot: index + 1 };
+    } catch (error) {
+      failures.push(`key-${index + 1}: ${error.message}`);
+    }
+  }
+
+  throw new Error(`All Gemini keys failed (${failures.join('; ')})`);
+};
+
+module.exports = { callGemini, getGeminiKeys };
