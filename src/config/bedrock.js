@@ -1,6 +1,8 @@
 const https = require('https');
 const { BedrockRuntimeClient, ConverseCommand, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 require('dotenv').config();
+const { callOpenRouter } = require('./openrouter');
+
 
 const region = process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
 const modelId = process.env.BEDROCK_MODEL_ID || 'anthropic.claude-3-haiku-20240307-v1:0';
@@ -118,6 +120,20 @@ const invokeWithAwsSdk = async ({ systemText, userText, attachment, maxTokens = 
 };
 
 const invokeModel = async (options) => {
+  if (process.env.USE_OPENROUTER === 'true' && !options.attachment) {
+    const messages = [];
+    if (options.systemText) {
+      messages.push({ role: 'system', content: options.systemText });
+    }
+    messages.push({ role: 'user', content: options.userText });
+
+    try {
+      return await callOpenRouter(messages);
+    } catch (error) {
+      console.error('OpenRouter invocation failed, falling back to Bedrock:', error.message);
+    }
+  }
+
   if (bearerToken) {
     try {
       return await invokeWithBearerToken(options);
@@ -128,6 +144,7 @@ const invokeModel = async (options) => {
   }
   return invokeWithAwsSdk(options);
 };
+
 
 const parseEmbedding = (payload) => {
   if (Array.isArray(payload?.embedding)) return payload.embedding;
@@ -217,12 +234,18 @@ const improveHandbookQuestionFallback = (question) => ({
   detectedLanguage: 'en',
 });
 
-const improveHandbookQuestion = async (question) => {
+const improveHandbookQuestion = async (question, options = {}) => {
   const rawQuestion = String(question || '').trim();
   if (!rawQuestion) return improveHandbookQuestionFallback('');
 
+  const history = Array.isArray(options.history) ? options.history.slice(-6) : [];
+  const historyText = history.length
+    ? history.map((turn) => `User: ${turn.user_message}\nAssistant: ${turn.assistant_answer}`).join('\n\n')
+    : '(no previous conversation)';
+
   const systemText = 'You improve employee handbook questions for retrieval. Return only valid JSON.';
   const userText = `Rewrite this WhatsApp handbook question so it is clearer for search and answering.
+Use recent conversation only to resolve references such as "that", "it", "how many", or follow-up questions.
 Return ONLY JSON with keys:
 - originalQuestion: the user message unchanged
 - improvedQuestion: a clear, complete English handbook question
@@ -234,6 +257,9 @@ Rules:
 - Expand shorthand into explicit policy/procedure wording
 - Keep the same intent; do not invent facts
 - If already clear, lightly polish it
+
+Recent conversation:
+${historyText}
 
 User message: ${rawQuestion}`;
 
@@ -279,12 +305,77 @@ ${sourceText}`;
   }
 };
 
+const VISUAL_OBJECT_PATTERN = /\b(diagram|chart|table|form|map|image|picture|page|layout|organi[sz]ation chart|flowchart|figure|illustration|appendix|screenshot|drawing)\b/i;
+const VISUAL_REQUEST_PATTERN = /\b(show|send|display|attach|share|see|view|look at|give me|provide)\b/i;
+
+const hasExplicitVisualIntent = (question) => {
+  const text = String(question || '').trim();
+  return VISUAL_REQUEST_PATTERN.test(text) && VISUAL_OBJECT_PATTERN.test(text);
+};
+
+const decideReplyImagesFallback = (question, contexts, pageNumbers) => {
+  const sendImages = hasExplicitVisualIntent(question) && contexts.length > 0 && pageNumbers.length > 0;
+
+  return {
+    sendImages,
+    pageNumbers: sendImages ? pageNumbers.slice(0, 1) : [],
+    reason: sendImages ? 'Explicit visual request with a matching handbook page' : 'No explicit visual request',
+  };
+};
+
+const decideReplyImages = async ({ question, contexts, pageNumbers }) => {
+  if (!hasExplicitVisualIntent(question)) {
+    return { sendImages: false, pageNumbers: [], reason: 'No explicit visual request' };
+  }
+
+  const availablePages = pageNumbers.slice(0, 5);
+  if (!contexts.length || !availablePages.length) {
+    return { sendImages: false, pageNumbers: [], reason: 'No relevant handbook page available' };
+  }
+
+  const previews = contexts.slice(0, 3).map((context, index) => (
+    `[${index + 1}] pages=${JSON.stringify(context.metadata?.pageNumbers || [])} ${String(context.content || '').slice(0, 220)}`
+  )).join('\n');
+
+  const systemText = 'You select a handbook page only for an explicit visual request. Return only valid JSON. When uncertain, do not send an image.';
+  const userText = `Question: ${question}
+Candidate page numbers: ${availablePages.join(', ')}
+Matching chunk previews:
+${previews}
+
+Return ONLY JSON:
+{
+  "sendImages": boolean,
+  "pageNumbers": [one number from candidate list, or empty],
+  "reason": "short reason"
+}
+
+Select a page only when its matching text clearly refers to the requested visual object. Do not send a generic page, a loosely related page, or an image merely because the retrieved text contains visual words.`;
+
+  try {
+    const content = await invokeModel({ systemText, userText, maxTokens: 180, temperature: 0 });
+    const parsed = extractJsonObject(content);
+    const selected = Array.isArray(parsed.pageNumbers)
+      ? parsed.pageNumbers.map(Number).filter((value) => availablePages.includes(value)).slice(0, 1)
+      : [];
+
+    return {
+      sendImages: Boolean(parsed.sendImages) && selected.length > 0,
+      pageNumbers: selected,
+      reason: String(parsed.reason || '').trim() || 'Selected by model',
+    };
+  } catch (error) {
+    console.error('Reply image decision failed:', error.message);
+    return decideReplyImagesFallback(question, contexts, availablePages);
+  }
+};
+
 const answerWithKnowledgeContext = async ({ question, improvedQuestion, contexts }) => {
   const contextText = contexts
     .map((context, index) => `[${index + 1}] ${context.title || context.source_type || 'Knowledge'}\n${context.content}`)
     .join('\n\n');
 
-  const systemText = 'You are a helpful handbook assistant on WhatsApp. Answer using only the provided handbook context. If the context does not contain the answer, say you do not have that information in the handbook. Be concise, practical, and easy to read on mobile.';
+  const systemText = 'You are a careful property handbook assistant on WhatsApp. Answer using only the provided context. Prefer handbook sources. Distinguish exact labels and locations: never present a yard grille measurement as a master-bedroom window measurement. Cite handbook page numbers when they appear in context. If the requested detail is absent but a related drawing exists, state exactly what the drawing covers and what it does not prove. A context explicitly labeled User correction is trusted user-provided knowledge and may clarify or override an earlier learned answer. Be concise, practical, and easy to read on mobile.';
   const userText = `Handbook context:\n${contextText || '(no context)'}\n\nOriginal user question: ${question}\nImproved handbook question: ${improvedQuestion || question}\n\nProvide a helpful answer grounded in the handbook.`;
 
   const answer = await invokeModel({ systemText, userText, maxTokens: 700, temperature: 0.3 });
@@ -292,10 +383,14 @@ const answerWithKnowledgeContext = async ({ question, improvedQuestion, contexts
 };
 
 const extractTextFromPdfDocument = async (documentBuffer, documentName = 'handbook', pageLabel = '') => {
-  const systemText = 'You extract readable text from PDF documents. Return plain text only.';
+  const systemText = 'You perform faithful OCR and visual document analysis for a scanned property handbook. Return plain text only. Never guess unreadable values.';
   const userText = pageLabel
-    ? `Transcribe all visible text from this handbook PDF page (${pageLabel}). Preserve headings, lists, and section order. Return plain text only.`
-    : 'Transcribe all visible text from this handbook PDF. Preserve headings, lists, and section order. Return plain text only.';
+    ? `Study this scanned handbook page (${pageLabel}) and produce a retrieval-ready transcription.
+
+Include every readable heading, paragraph, list, note, table cell, drawing label, room name, location, measurement, and unit. Preserve width x height dimensions exactly as printed. If the page contains a plan, drawing, table, or diagram, add a short "Visual summary:" describing what it actually shows and which labels or locations each measurement belongs to.
+
+Do not infer measurements or room associations that are not explicitly shown. Write [unreadable] for a value that cannot be read reliably. Return plain text only.`
+    : 'Study this scanned property handbook and produce a faithful retrieval-ready transcription. Include all readable text, measurements, units, tables, diagram labels, room names, locations, and visual meaning. Do not guess unreadable values. Return plain text only.';
 
   return invokeModel({
     systemText,
@@ -315,6 +410,8 @@ module.exports = {
   generateEmbedding,
   improveHandbookQuestion,
   localizeText,
+  decideReplyImages,
   answerWithKnowledgeContext,
   extractTextFromPdfDocument,
+  _test: { hasExplicitVisualIntent, decideReplyImagesFallback },
 };

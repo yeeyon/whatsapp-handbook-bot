@@ -1,6 +1,6 @@
 node_modules/
 .env
 auth_info_baileys/
-data/auth/
+data/
 data/*.pdf
 *.log

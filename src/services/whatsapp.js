@@ -11,6 +11,12 @@ const {
   isJidGroup,
 } = require('@whiskeysockets/baileys');
 const { answerKnowledgeQuestion } = require('./knowledgeBase');
+const {
+  parseFeedbackMessage,
+  getOrCreateConversation,
+  markTurnDelivered,
+  recordFeedback,
+} = require('./conversationMemory');
 
 const logger = pino({ level: 'warn' });
 const AUTH_DIR = process.env.AUTH_STATE_DIR || path.join(process.cwd(), 'auth_info_baileys');
@@ -46,11 +52,13 @@ const isGreeting = (text) => /^(hi|hello|hey|good morning|good afternoon|good ev
 
 const buildHelpText = () => (
   'Handbook assistant is ready.\n\n'
-  + 'Ask any question about the handbook. I will improve unclear questions automatically before searching.\n\n'
+  + 'Ask any question about the D\'Starlington Property Handbook.\n\n'
   + 'Examples:\n'
-  + '- What is the leave policy?\n'
-  + '- How do I submit a claim?\n'
-  + '- cuti berapa hari?\n\n'
+  + '- What are the opening hours for the game room?\n'
+  + '- What is the renovation deposit amount?\n'
+  + '- What are the rules for the mini theater room?\n'
+  + '- What is the replacement fee for access cards?\n'
+  + '- Give me emergency contact numbers\n\n'
   + 'Type "help" anytime to see this message.'
 );
 
@@ -64,7 +72,7 @@ const showTyping = async (sock, remoteJid, active) => {
 
 const handleQuestion = async (sock, remoteJid, question) => {
   if (isGreeting(question)) {
-    await sock.sendMessage(remoteJid, { text: `Hello! ${buildHelpText()}` });
+    await sock.sendMessage(remoteJid, { text: `👋 Hi there! Welcome to the D'Starlington Property Handbook assistant.\n\n${buildHelpText()}` });
     return;
   }
 
@@ -76,21 +84,51 @@ const handleQuestion = async (sock, remoteJid, question) => {
   await showTyping(sock, remoteJid, true);
 
   try {
-    const result = await answerKnowledgeQuestion(question);
+    const conversation = await getOrCreateConversation({ channel: 'whatsapp', externalId: remoteJid });
+    const feedback = parseFeedbackMessage(question);
+    if (feedback) {
+      const recorded = await recordFeedback({ conversationId: conversation.id, feedback });
+      const confirmation = !recorded
+        ? 'I do not have a previous answer to attach that feedback to.'
+        : feedback.type === 'correction'
+          ? 'Thanks. I saved that correction for future questions.'
+          : feedback.type === 'positive'
+            ? 'Thanks. I marked the previous answer as helpful.'
+            : 'Thanks. I will stop using that previous answer as learned knowledge.';
+      await sock.sendMessage(remoteJid, { text: confirmation });
+      return;
+    }
+
+    const result = await answerKnowledgeQuestion(question, { conversationId: conversation.id });
     const answer = result.answer || result;
     const improved = result.refined?.improvedQuestion;
 
-    const reply = improved && improved !== question
-      ? `I understood your question as:\n"${improved}"\n\n${answer}`
-      : answer;
+    const reply = answer;
 
     await sock.sendMessage(remoteJid, { text: reply });
+    if (result.turnId) await markTurnDelivered(result.turnId);
+
+    const images = Array.isArray(result.images) ? result.images : [];
+    // Use total page count from imageDecision (set for direct-page requests)
+    const totalPageCount = result.imageDecision?.pageCount || null;
+    for (const image of images) {
+      const caption = totalPageCount
+        ? `Handbook page ${image.pageNumber} of ${totalPageCount}`
+        : `Handbook page ${image.pageNumber}`;
+      await sock.sendMessage(remoteJid, {
+        image: image.buffer,
+        caption,
+      });
+    }
+
     io?.emit('ai-response', {
       to: remoteJid,
       original: question,
       improved,
       response: answer,
+      images: images.map((image) => image.pageNumber),
       timestamp: new Date().toISOString(),
+      turnId: result.turnId,
     });
   } finally {
     await showTyping(sock, remoteJid, false);
@@ -182,6 +220,20 @@ const startWhatsAppBot = async () => {
   sock.ev.on('creds.update', auth.saveCreds);
 };
 
+const sendWhatsAppMessage = async (remoteJid, text) => {
+  if (!globalSock) {
+    throw new Error('WhatsApp bot is not connected');
+  }
+  await globalSock.sendMessage(remoteJid, { text });
+};
+
+const sendWhatsAppImage = async (remoteJid, imageBuffer, caption = '') => {
+  if (!globalSock) {
+    throw new Error('WhatsApp bot is not connected');
+  }
+  await globalSock.sendMessage(remoteJid, { image: imageBuffer, caption });
+};
+
 const disconnectWhatsAppBot = async () => {
   if (globalSock) {
     await globalSock.logout();
@@ -201,4 +253,6 @@ module.exports = {
   setIO,
   getConnectionStatus,
   getQRCodeData,
+  sendWhatsAppMessage,
+  sendWhatsAppImage,
 };

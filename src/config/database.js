@@ -12,9 +12,16 @@ const pool = new Pool({
 });
 
 const initDatabase = async () => {
-  const migrationPath = path.join(__dirname, '../../migrations/001_knowledge_base.sql');
-  const sql = fs.readFileSync(migrationPath, 'utf8');
-  await pool.query(sql);
+  const migrationsDir = path.join(__dirname, '../../migrations');
+  const migrationFiles = fs.readdirSync(migrationsDir)
+    .filter((file) => file.endsWith('.sql'))
+    .sort();
+
+  for (const file of migrationFiles) {
+    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    await pool.query(sql);
+  }
+
   console.log('Database initialized');
 };
 
