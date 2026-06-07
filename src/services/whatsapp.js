@@ -26,6 +26,7 @@ let reconnectTimeout = null;
 let qrCodeData = null;
 let connectionStatus = 'disconnected';
 let io = null;
+let socketGeneration = 0;
 
 const setIO = (socketIo) => {
   io = socketIo;
@@ -103,23 +104,27 @@ const handleQuestion = async (sock, remoteJid, question) => {
     const answer = result.answer || result;
     const improved = result.refined?.improvedQuestion;
 
-    const reply = answer;
-
-    await sock.sendMessage(remoteJid, { text: reply });
-    if (result.turnId) await markTurnDelivered(result.turnId);
-
     const images = Array.isArray(result.images) ? result.images : [];
+    const isDirectPageRequest = result.imageDecision?.reason === 'Exact handbook page requested';
+    if (!isDirectPageRequest || !images.length) {
+      await sock.sendMessage(remoteJid, { text: answer });
+    }
+
     // Use total page count from imageDecision (set for direct-page requests)
     const totalPageCount = result.imageDecision?.pageCount || null;
     for (const image of images) {
-      const caption = totalPageCount
+      const caption = isDirectPageRequest
+        ? answer
+        : totalPageCount
         ? `Handbook page ${image.pageNumber} of ${totalPageCount}`
         : `Handbook page ${image.pageNumber}`;
       await sock.sendMessage(remoteJid, {
         image: image.buffer,
+        mimetype: 'image/jpeg',
         caption,
       });
     }
+    if (result.turnId) await markTurnDelivered(result.turnId);
 
     io?.emit('ai-response', {
       to: remoteJid,
@@ -136,6 +141,25 @@ const handleQuestion = async (sock, remoteJid, question) => {
 };
 
 const startWhatsAppBot = async () => {
+  socketGeneration += 1;
+  const generation = socketGeneration;
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+
+  // Clean up existing socket before starting a new one to prevent conflicting parallel connections
+  if (globalSock) {
+    console.log('Closing existing WhatsApp socket connection...');
+    try {
+      globalSock.ev.removeAllListeners();
+      globalSock.end(undefined);
+    } catch (err) {
+      console.error('Error closing existing socket:', err.message);
+    }
+    globalSock = null;
+  }
+
   connectionStatus = 'connecting';
   emitStatus();
 
@@ -144,11 +168,20 @@ const startWhatsAppBot = async () => {
   }
 
   const auth = await useMultiFileAuthState(AUTH_DIR);
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`Baileys WA v${version.join('.')} (latest: ${isLatest})`);
 
-  const sock = makeWASocket({
-    version,
+  // Fetch the recommended protocol version when available; otherwise use Baileys' bundled default.
+  let version;
+  try {
+    const latest = await fetchLatestBaileysVersion();
+    if (latest && latest.version) {
+      version = latest.version;
+      console.log(`Baileys WA v${version.join('.')} (latest: ${latest.isLatest})`);
+    }
+  } catch (err) {
+    console.warn('Failed to fetch latest Baileys version; using the library default:', err.message);
+  }
+
+  const socketOptions = {
     auth: auth.state,
     logger,
     printQRInTerminal: false,
@@ -156,7 +189,11 @@ const startWhatsAppBot = async () => {
     syncFullHistory: false,
     markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
-  });
+    defaultQueryTimeoutMs: 60000, // Prevent "deaf sessions" (hanging queries)
+  };
+  if (version) socketOptions.version = version;
+
+  const sock = makeWASocket(socketOptions);
 
   globalSock = sock;
 
@@ -178,12 +215,15 @@ const startWhatsAppBot = async () => {
       emitStatus();
       console.log('WhatsApp disconnected:', lastDisconnect?.error?.message || 'unknown');
 
-      if (shouldReconnect) {
+      // Only reconnect if this socket is still the active one (prevents zombie loop from replaced sockets)
+      if (shouldReconnect && globalSock === sock && generation === socketGeneration) {
         if (reconnectTimeout) clearTimeout(reconnectTimeout);
         reconnectTimeout = setTimeout(() => {
           console.log('Reconnecting WhatsApp...');
           startWhatsAppBot().catch(console.error);
         }, 5000);
+      } else {
+        console.log('Skipping reconnect: either logged out or a newer socket instance has taken over.');
       }
     } else if (connection === 'open') {
       connectionStatus = 'connected';
@@ -231,12 +271,17 @@ const sendWhatsAppImage = async (remoteJid, imageBuffer, caption = '') => {
   if (!globalSock) {
     throw new Error('WhatsApp bot is not connected');
   }
-  await globalSock.sendMessage(remoteJid, { image: imageBuffer, caption });
+  await globalSock.sendMessage(remoteJid, { image: imageBuffer, mimetype: 'image/jpeg', caption });
 };
 
 const disconnectWhatsAppBot = async () => {
   if (globalSock) {
-    await globalSock.logout();
+    try {
+      globalSock.ev.removeAllListeners();
+      await globalSock.logout();
+    } catch (err) {
+      console.error('Error during logout:', err.message);
+    }
     globalSock = null;
   }
   if (fs.existsSync(AUTH_DIR)) {

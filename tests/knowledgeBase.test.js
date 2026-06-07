@@ -51,3 +51,10 @@ test('direct page requests bypass semantic retrieval', () => {
   assert.equal(_test.parseDirectPageRequest('What is on page 12?'), 12);
   assert.equal(_test.parseDirectPageRequest('Which page mentions the pool?'), null);
 });
+
+test('clear standalone questions skip model-based rewriting', () => {
+  assert.equal(_test.requiresQuestionImprovement('What are the opening hours for the game room?'), false);
+  assert.equal(_test.requiresQuestionImprovement('Give me emergency contact numbers'), false);
+  assert.equal(_test.requiresQuestionImprovement('Game room opening hour'), true);
+  assert.equal(_test.requiresQuestionImprovement('How about that?', [{ id: 1 }]), true);
+});

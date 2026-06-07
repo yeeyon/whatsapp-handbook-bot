@@ -40,6 +40,8 @@ const SEARCH_STOP_WORDS = new Set([
 ]);
 const AMBIGUOUS_SINGLE_TERMS = new Set(['schedule', 'policy', 'procedure', 'rules', 'form', 'section', 'document']);
 const DIRECT_PAGE_REQUEST_PATTERN = /(?:^|\b(?:show|send|give|open|view|see|display|share|what(?:'s| is)?(?: on| in)?|contents? of)\b[\s\S]{0,35}\b)(?:page|pg)\s*#?\s*(\d{1,4})\b/i;
+const CLEAR_QUESTION_PATTERN = /^(?:what|when|where|which|who|why|how|can|could|would|should|is|are|do|does|give me|show me|send me|tell me|list)\b/i;
+const CONTEXT_REFERENCE_PATTERN = /\b(?:it|that|those|these|they|them|same|previous|above|then|how about|what about)\b/i;
 
 const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
@@ -75,6 +77,16 @@ const isUnderspecifiedQuestion = (question) => {
 const parseDirectPageRequest = (question) => {
   const match = String(question || '').match(DIRECT_PAGE_REQUEST_PATTERN);
   return match ? Number(match[1]) : null;
+};
+
+const requiresQuestionImprovement = (question, history = []) => {
+  const text = normalizeWhitespace(question);
+  if (!text || /[^\x00-\x7F]/.test(text)) return true;
+
+  const words = text.split(' ').filter(Boolean);
+  if (words.length < 4 || !CLEAR_QUESTION_PATTERN.test(text)) return true;
+
+  return history.length > 0 && CONTEXT_REFERENCE_PATTERN.test(text);
 };
 
 const estimateTokenCount = (value) => Math.ceil(normalizeWhitespace(value).length / 4);
@@ -359,11 +371,14 @@ const searchKnowledge = async (question, options = {}) => {
      LIMIT 1000`
   );
 
-  let questionEmbedding = null;
-  try {
-    questionEmbedding = await generateEmbedding(question);
-  } catch (error) {
-    console.error('Knowledge question embedding failed:', error.message);
+  let questionEmbedding = options.questionEmbedding;
+  if (questionEmbedding === undefined) {
+    try {
+      questionEmbedding = await generateEmbedding(question);
+    } catch (error) {
+      console.error('Knowledge question embedding failed:', error.message);
+      questionEmbedding = null;
+    }
   }
 
   return chunksResult.rows
@@ -406,11 +421,14 @@ const searchLearnedMemories = async (question, options = {}) => {
   const memories = await listActiveMemories();
   if (!memories.length) return [];
 
-  let questionEmbedding = null;
-  try {
-    questionEmbedding = await generateEmbedding(question);
-  } catch (error) {
-    console.error('Learned memory question embedding failed:', error.message);
+  let questionEmbedding = options.questionEmbedding;
+  if (questionEmbedding === undefined) {
+    try {
+      questionEmbedding = await generateEmbedding(question);
+    } catch (error) {
+      console.error('Learned memory question embedding failed:', error.message);
+      questionEmbedding = null;
+    }
   }
 
   return memories
@@ -458,9 +476,6 @@ const answerKnowledgeQuestion = async (question, options = {}) => {
     let answer = page
       ? `Here is page ${requestedPage} of ${pageCount || 'the handbook'}.`
       : `Page ${requestedPage} is not available. The current handbook has ${pageCount} page${pageCount === 1 ? '' : 's'}.`;
-    if (page && process.env.PUBLIC_URL) {
-      answer += `\n\nView PDF: ${process.env.PUBLIC_URL}/handbook.pdf#page=${requestedPage}`;
-    }
     const images = page
       ? await getHandbookPageImages({ sourceId: page.source_id, pageNumbers: [requestedPage] })
       : [];
@@ -501,7 +516,14 @@ const answerKnowledgeQuestion = async (question, options = {}) => {
       turnId: turn?.id || null,
     };
   }
-  const refined = await improveHandbookQuestion(question, { history });
+  const refined = requiresQuestionImprovement(question, history)
+    ? await improveHandbookQuestion(question, { history })
+    : {
+      originalQuestion: String(question || '').trim(),
+      improvedQuestion: String(question || '').trim(),
+      searchQueries: [String(question || '').trim()],
+      detectedLanguage: 'en',
+    };
   if (isUnderspecifiedQuestion(refined.originalQuestion) || isUnderspecifiedQuestion(refined.improvedQuestion)) {
     const answer = 'Please specify which policy, schedule, form, procedure, or handbook topic you mean.';
     const turn = conversation ? await createTurn({
@@ -528,9 +550,22 @@ const answerKnowledgeQuestion = async (question, options = {}) => {
     ...refined.searchQueries,
   ].filter(Boolean))];
 
+  const embeddings = await Promise.all(searchTerms.map(async (term) => {
+    try {
+      return await generateEmbedding(term);
+    } catch (error) {
+      console.error('Question embedding failed:', error.message);
+      return null;
+    }
+  }));
   const [contextLists, learnedLists] = await Promise.all([
-    Promise.all(searchTerms.map((term) => searchKnowledge(term))),
-    Promise.all(searchTerms.map((term) => searchLearnedMemories(term, { conversationId: conversation?.id }))),
+    Promise.all(searchTerms.map((term, index) => searchKnowledge(term, {
+      questionEmbedding: embeddings[index],
+    }))),
+    Promise.all(searchTerms.map((term, index) => searchLearnedMemories(term, {
+      conversationId: conversation?.id,
+      questionEmbedding: embeddings[index],
+    }))),
   ]);
   const handbookContexts = mergeContexts(contextLists);
   const learnedContexts = mergeContexts(learnedLists);
@@ -588,12 +623,6 @@ const answerKnowledgeQuestion = async (question, options = {}) => {
   const cleanAnswer = cleanLeakedMetadata(result.answer);
   let localizedAnswer = cleanLeakedMetadata(await localizeText(cleanAnswer, refined.detectedLanguage));
 
-  // If PUBLIC_URL is configured and we have candidate pages, append direct PDF page reference links
-  if (process.env.PUBLIC_URL && candidatePages.length > 0) {
-    const links = candidatePages.map((p) => `${process.env.PUBLIC_URL}/handbook.pdf#page=${p}`).join('\n');
-    localizedAnswer += `\n\nPDF Page Reference(s):\n${links}`;
-  }
-
   const images = imageDecision.sendImages && sourceId
     ? await getHandbookPageImages({ sourceId, pageNumbers: imageDecision.pageNumbers })
     : [];
@@ -632,6 +661,7 @@ module.exports = {
     isKnowledgeMatch,
     isUnderspecifiedQuestion,
     parseDirectPageRequest,
+    requiresQuestionImprovement,
     buildChunkRecords,
   },
 };

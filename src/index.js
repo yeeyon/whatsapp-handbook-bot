@@ -211,14 +211,18 @@ app.post('/api/whatsapp/webhook', async (req, res) => {
       }
       if (jid.includes('@s.whatsapp.net') || jid.includes('@g.us')) {
         try {
-          await sendWhatsAppMessage(jid, answer);
+          const images = Array.isArray(result.images) ? result.images : [];
+          const isDirectPageRequest = result.imageDecision?.reason === 'Exact handbook page requested';
+          if (!isDirectPageRequest || !images.length) {
+            await sendWhatsAppMessage(jid, answer);
+          }
           console.log(`Routed response back to WhatsApp via socket: ${jid}`);
 
-          // Send page images if any
-          const images = Array.isArray(result.images) ? result.images : [];
           const totalPageCount = result.imageDecision?.pageCount || null;
           for (const image of images) {
-            const caption = totalPageCount
+            const caption = isDirectPageRequest
+              ? answer
+              : totalPageCount
               ? `Handbook page ${image.pageNumber} of ${totalPageCount}`
               : `Handbook page ${image.pageNumber}`;
             try {

@@ -73,25 +73,7 @@ const markTurnDelivered = async (turnId) => {
      RETURNING *`,
     [turnId]
   );
-  const turn = turnResult.rows[0];
-  if (!turn) return null;
-
-  const hasGroundedContext = Array.isArray(turn.retrieval_context) && turn.retrieval_context.length > 0;
-  if (hasGroundedContext) {
-    const embedding = await buildMemoryEmbedding(turn.improved_question || turn.user_message, turn.assistant_answer);
-    await pool.query(
-      `INSERT INTO rag_memories (turn_id, question, answer, embedding)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (turn_id) DO UPDATE SET
-         question = EXCLUDED.question,
-         answer = EXCLUDED.answer,
-         embedding = EXCLUDED.embedding,
-         active = TRUE,
-         updated_at = CURRENT_TIMESTAMP`,
-      [turn.id, turn.improved_question || turn.user_message, turn.assistant_answer, embedding ? JSON.stringify(embedding) : null]
-    );
-  }
-  return turn;
+  return turnResult.rows[0] || null;
 };
 
 const getLatestDeliveredTurn = async (conversationId) => {
@@ -149,6 +131,7 @@ const listActiveMemories = async (limit = 500) => {
      FROM rag_memories rm
      JOIN rag_turns rt ON rt.id = rm.turn_id
      WHERE rm.active = TRUE
+       AND rm.memory_type IN ('user_correction', 'confirmed_answer')
      ORDER BY rm.updated_at DESC
      LIMIT $1`,
     [limit]
