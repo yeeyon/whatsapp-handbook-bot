@@ -4,6 +4,7 @@ const { BedrockRuntimeClient, ConverseCommand, InvokeModelCommand } = require('@
 require('dotenv').config();
 const { callOpenRouter } = require('./openrouter');
 const { callGemini } = require('./gemini');
+const { callNvidia } = require('./nvidia');
 
 
 const region = process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
@@ -13,6 +14,8 @@ const bearerToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
 const hasAwsCredentials = Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
 const providerTraceStorage = new AsyncLocalStorage();
 const providerStats = {
+  nvidiaSuccesses: 0,
+  nvidiaFailures: 0,
   openrouterSuccesses: 0,
   openrouterFailures: 0,
   geminiSuccesses: 0,
@@ -51,7 +54,17 @@ const runWithProviderTrace = async (operation) => providerTraceStorage.run({ cal
 });
 
 const getAIProviderStatus = () => ({
-  configuredGenerationProvider: process.env.USE_OPENROUTER === 'true' ? 'openrouter' : 'bedrock',
+  configuredGenerationProvider: process.env.USE_NVIDIA === 'true' ? 'nvidia' : (process.env.USE_OPENROUTER === 'true' ? 'openrouter' : 'bedrock'),
+  nvidia: {
+    enabled: process.env.USE_NVIDIA === 'true',
+    configured: Boolean(process.env.NVIDIA_API_KEY),
+    configuredKeyCount: [
+      process.env.NVIDIA_API_KEY,
+      process.env.NVIDIA_API_KEY_2,
+      process.env.NVIDIA_API_KEY_3,
+    ].filter(Boolean).length,
+    model: process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct',
+  },
   openrouter: {
     enabled: process.env.USE_OPENROUTER === 'true',
     configured: Boolean(process.env.OPENROUTER_API_KEY),
@@ -73,7 +86,7 @@ const getAIProviderStatus = () => ({
     configured: Boolean(bearerToken || hasAwsCredentials),
     generationModel: modelId,
     embeddingModel: embeddingModelId,
-    role: process.env.USE_OPENROUTER === 'true' ? 'last-resort-generation-and-embeddings' : 'generation-and-embeddings',
+    role: (process.env.USE_NVIDIA === 'true' || process.env.USE_OPENROUTER === 'true') ? 'last-resort-generation-and-embeddings' : 'generation-and-embeddings',
   },
   processStats: { ...providerStats },
 });
@@ -189,13 +202,44 @@ const invokeWithAwsSdk = async ({ systemText, userText, attachment, maxTokens = 
 
 const invokeModel = async (options) => {
   let generationFallbackNeeded = false;
-  if (process.env.USE_OPENROUTER === 'true' && !options.attachment) {
-    const messages = [];
-    if (options.systemText) {
-      messages.push({ role: 'system', content: options.systemText });
-    }
-    messages.push({ role: 'user', content: options.userText });
+  const messages = [];
+  if (options.systemText) {
+    messages.push({ role: 'system', content: options.systemText });
+  }
+  messages.push({ role: 'user', content: options.userText });
 
+  // 1. Try Nvidia
+  if (process.env.USE_NVIDIA === 'true' && !options.attachment) {
+    try {
+      const nvidiaResult = await callNvidia(messages);
+      providerStats.nvidiaSuccesses += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'nvidia',
+        model: process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct',
+        status: 'success',
+        keySlot: `key-${nvidiaResult.keySlot}`,
+      });
+      return nvidiaResult.content;
+    } catch (error) {
+      generationFallbackNeeded = true;
+      providerStats.nvidiaFailures += 1;
+      recordProviderCall({
+        operation: 'generation',
+        task: options.task || 'generation',
+        provider: 'nvidia',
+        model: process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct',
+        status: 'failed',
+        error: error.message,
+      });
+      console.error('Nvidia invocation failed, falling back:', error.message);
+    }
+  }
+
+  // 2. Try OpenRouter
+  if (((process.env.USE_NVIDIA === 'true' && generationFallbackNeeded) || (process.env.USE_NVIDIA !== 'true' && process.env.USE_OPENROUTER === 'true')) &&
+      process.env.USE_OPENROUTER === 'true' && !options.attachment) {
     try {
       const openrouterResult = await callOpenRouter(messages);
       providerStats.openrouterSuccesses += 1;
@@ -223,6 +267,7 @@ const invokeModel = async (options) => {
     }
   }
 
+  // 3. Try Gemini
   if (generationFallbackNeeded && process.env.GEMINI_API_KEY && !options.attachment) {
     const geminiModels = [...new Set([
       process.env.GEMINI_MODEL || 'gemini-2.5-flash',
@@ -260,6 +305,7 @@ const invokeModel = async (options) => {
     console.error('All Gemini models failed, falling back to Bedrock.');
   }
 
+  // 4. Try Bedrock
   if (generationFallbackNeeded) providerStats.fallbacksToBedrock += 1;
 
   if (bearerToken) {
